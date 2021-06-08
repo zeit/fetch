@@ -4,6 +4,9 @@ const listen = require('async-listen');
 const {createServer} = require('http');
 const fetch = require('../index')();
 const url = require('url');
+const FormData = require('form-data');
+const Busboy = require('busboy');
+const {Readable} = require('stream');
 
 exports.retriesUponHttp500 = async () => {
 	let i = 0;
@@ -94,6 +97,65 @@ exports.supportsSearchParamsRequestBody = async () => {
 	const res = await fetch(`http://127.0.0.1:${port}`, {
 		method: 'POST',
 		body: new url.URLSearchParams({foo: 'bar'})
+	});
+	await res.text();
+	server.close();
+};
+
+exports.supportsFormDataRequestBody = async () => {
+	const server = createServer(async (req, res) => {
+		const [body, error] = await new Promise(resolve => {
+			const busboy = new Busboy({headers: req.headers});
+			busboy.on('error', err => resolve([null, err]));
+			busboy.on('file', async (fieldname, file, filename, encoding, mimetype) => {
+				let fileContent = '';
+				file.on('data', chunk => {
+					fileContent += chunk;
+				});
+				file.on('end', () => {
+					resolve([{fieldname, filename, encoding, mimetype, fileContent}]);
+				});
+				file.on('error', error_ => {
+					resolve([null, error_]);
+				});
+			});
+			busboy.on('finish', () => {
+				res.end();
+			});
+			setTimeout(() => resolve([null, new Error('Timeout')]), 3000);
+			req.pipe(busboy);
+		});
+		assert.ok(!error);
+		assert.ok(/multipart\/form-data;/.test(req.headers['content-type']));
+		assert.deepEqual(body, {
+			fieldname: 'file',
+			filename: 'dummy.txt',
+			encoding: '7bit',
+			mimetype: 'text/plain',
+			fileContent: 'input string'
+		});
+		res.end();
+	});
+	await listen(server);
+	const {port} = server.address();
+
+	const formData = new FormData();
+	const readable = new Readable();
+	readable._read = () => {};
+	readable.push(Buffer.from('input string'));
+	readable.push(null);
+	formData.append(
+		'file',
+		readable,
+		{
+			filename: 'dummy.txt',
+			contentType: 'text/plain'
+		}
+	);
+
+	const res = await fetch(`http://127.0.0.1:${port}`, {
+		method: 'POST',
+		body: formData
 	});
 	await res.text();
 	server.close();
